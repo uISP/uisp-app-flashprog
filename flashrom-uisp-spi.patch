@@ -1,0 +1,389 @@
+Index: uisp_spi.c
+===================================================================
+--- uisp_spi.c	(revision 0)
++++ uisp_spi.c	(revision 0)
+@@ -0,0 +1,270 @@
++/*
++ * This file is part of the flashrom project.
++ * uISP programmer interface
++ *
++ * Copyright (C) 2014 Andew "Necromant" Andrianov <andrew@ncrmnt.org>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; version 2 of the License.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301 USA
++ */
++
++#include <stdio.h>
++#include <strings.h>
++#include <string.h>
++#include <stdlib.h>
++#include <ctype.h>
++#include <unistd.h>
++#include <usb.h>
++#include "flash.h"
++#include "programmer.h"
++#include "spi.h"
++#include "chipdrivers.h"
++
++
++#define UISP_TIMEOUT 30000
++static usb_dev_handle *hndl;
++
++#define UISP_VID   0x1d50
++#define UISP_PID   0x6032
++#define UISP_MSTR  "www.ncrmnt.org"
++#define UISP_PSTR  "uISP-flashprog"
++
++enum { 
++	RQ_IO=0,
++	RQ_CS,
++	RQ_SETSPEED,
++	RQ_LED,
++} uisp_requsts; 
++
++const struct dev_entry devs_usbuispspi[] = {
++	{UISP_VID, UISP_PID, OK, UISP_MSTR, UISP_PSTR},
++
++	{}
++};
++
++static int  usb_get_string_ascii(usb_dev_handle *dev, int index, int langid, char *buf, int buflen)
++{
++	char    buffer[256];
++	int     rval, i;
++	
++	if((rval = usb_control_msg(dev, 
++				   USB_ENDPOINT_IN, 
++				   USB_REQ_GET_DESCRIPTOR, 
++				   (USB_DT_STRING << 8) + index, 
++				   langid, buffer, sizeof(buffer), 
++				   1000)) < 0)
++		return rval;
++	if(buffer[1] != USB_DT_STRING)
++		return 0;
++	if((unsigned char)buffer[0] < rval)
++		rval = (unsigned char)buffer[0];
++	rval /= 2;
++	/* lossy conversion to ISO Latin1 */
++	for(i=1; i<rval; i++) {
++		if(i > buflen)  /* destination buffer overflow */
++			break;
++		buf[i-1] = buffer[2 * i];
++		if(buffer[2 * i + 1] != 0)  /* outside of ISO Latin1 range */
++			buf[i-1] = '?';
++	}
++	buf[i-1] = 0;
++	return i-1;
++}
++
++
++static int usb_match_string(usb_dev_handle *handle, int index, char* string)
++{
++	char tmp[256];
++	if (string == NULL)
++		return 1; /* NULL matches anything */
++	usb_get_string_ascii(handle, index, 0x409, tmp, 256);
++	return (strcmp(string,tmp)==0);
++}
++
++static usb_dev_handle *usb_check_device(struct usb_device *dev,
++				 char *vendor_name, 
++				 char *product_name, 
++				 char *serial)
++{
++	usb_dev_handle      *handle = usb_open(dev);
++	if(!handle) {
++		fprintf(stderr, "Warning: cannot open USB device: %s\n", usb_strerror());
++		return NULL;
++	}
++	if (
++		usb_match_string(handle, dev->descriptor.iManufacturer, vendor_name) &&
++		usb_match_string(handle, dev->descriptor.iProduct,      product_name) &&
++		usb_match_string(handle, dev->descriptor.iSerialNumber, serial)
++		) {
++		return handle;
++	}
++	usb_close(handle);
++	return NULL;
++	
++}
++
++static usb_dev_handle *nc_usb_open(int vendor, int product, char *vendor_name, char *product_name, char *serial)
++{
++	struct usb_bus      *bus;
++	struct usb_device   *dev;
++	usb_dev_handle      *handle = NULL;
++	
++
++	usb_find_busses();
++	usb_find_devices();
++
++	for(bus=usb_get_busses(); bus; bus=bus->next) {
++		for(dev=bus->devices; dev; dev=dev->next) {
++			            if(dev->descriptor.idVendor == vendor && 
++				       dev->descriptor.idProduct == product) {
++					    handle = usb_check_device(dev, vendor_name, product_name, serial);
++					    if (handle)
++						    return handle;
++				    }
++		}
++	}
++	return NULL;
++}
++
++
++
++static int send_read(unsigned int readcnt, void *readarr)
++{
++	msg_pspew("%s\n", __func__);
++	int ret; 
++	ret = usb_control_msg(
++		hndl,             // handle obtained with usb_open()
++		USB_TYPE_VENDOR | USB_RECIP_DEVICE | USB_ENDPOINT_IN, // bRequestType
++		RQ_IO,      // bRequest
++		0,              // wValue
++		0,              // wIndex
++		readarr,             // pointer to source buffer
++		readcnt,  // wLength
++		UISP_TIMEOUT
++		);
++	msg_pspew("%s: control ret %d ", __func__, ret); 
++	if (ret != readcnt) {
++		perror(__func__);
++		return -1; 
++	}
++	return 0;
++}
++
++static int do_control(int rq, int value, int index)
++{
++	return  usb_control_msg(
++		hndl,             // handle obtained with usb_open()
++		USB_TYPE_VENDOR | USB_RECIP_DEVICE | USB_ENDPOINT_IN, // bRequestType
++		rq,      // bRequest
++		value,              // wValue
++		index,              // wIndex
++		NULL,             // pointer to destination buffer
++		0,  // wLength
++		UISP_TIMEOUT
++		);
++}
++
++static int send_write(unsigned int writecnt, void *writearr)
++{
++	msg_pspew("%s\n", __func__);
++	int ret; 
++	ret = usb_control_msg(
++		hndl,             // handle obtained with usb_open()
++		USB_TYPE_VENDOR | USB_RECIP_DEVICE | USB_ENDPOINT_OUT, // bRequestType
++		RQ_IO,      // bRequest
++		0,              // wValue
++		0,              // wIndex
++		writearr,             // pointer to source buffer
++		writecnt,  // wLength
++		UISP_TIMEOUT
++		);
++	msg_pspew("%s: control ret %d ", __func__, ret); 
++	if (ret != writecnt) {
++		perror(__func__);
++		return -1; 
++	}
++	return 0;
++}
++
++
++static int uisp_spi_send_command(struct flashctx *flash,
++				     unsigned int writecnt,
++				     unsigned int readcnt,
++				     const unsigned char *writearr,
++				     unsigned char *readarr)
++{
++	msg_pspew("%s %d %d\n", __func__, readcnt, writecnt);
++	
++	int ret = 0;
++	
++	ret = do_control(RQ_CS, 0, 0);
++
++	if (!ret && writecnt)
++		ret = send_write(writecnt, (void *) writearr);
++
++	if (!ret && readcnt)
++		ret = send_read(readcnt, readarr);
++
++	ret = do_control(RQ_CS, 1, 0);
++
++	return ret;
++}
++
++
++static int uisp_spi_read(struct flashctx *flash, uint8_t *buf,
++			 unsigned int start, unsigned int len);
++
++/* We have 4096 maximum transfer length for control ep
++ * hardcoded in the usb stack. 
++ * Make sure to have long-transfers enabled
++ */
++static const struct spi_programmer spi_programmer_uisp = {
++	.type		= SPI_CONTROLLER_UISP,
++	.max_data_read	= 4096,
++	.max_data_write	= 4096,
++	.command	= uisp_spi_send_command,
++	.multicommand	= default_spi_send_multicommand,
++	.read		= uisp_spi_read,
++	.write_256	= default_spi_write_256,
++	.write_aai	= default_spi_write_aai,
++};
++
++static int uisp_spi_read(struct flashctx *flash, uint8_t *buf,
++			    unsigned int start, unsigned int len)
++{
++	unsigned int i, cur_len;
++	const unsigned int max_read = spi_programmer_uisp.max_data_read;
++	for (i = 0; i < len; i += cur_len) {
++		int ret;
++		cur_len = min(max_read, (len - i));
++		ret = spi_nbyte_read(flash, start + i, buf + i, cur_len);
++		if (ret)
++			return ret;
++	}
++	return 0;
++}
++
++
++
++int uisp_spi_init(void)
++{	
++	msg_pspew("%s\n", __func__);
++	usb_init();
++	hndl = nc_usb_open(UISP_VID, UISP_PID, UISP_MSTR, UISP_PSTR, NULL);
++	if (!hndl)  
++		return 1;
++	
++	register_spi_programmer(&spi_programmer_uisp);
++	
++	return 0;
++}
+Index: programmer.h
+===================================================================
+--- programmer.h	(revision 1797)
++++ programmer.h	(working copy)
+@@ -90,6 +90,9 @@
+ #if CONFIG_USBBLASTER_SPI == 1
+ 	PROGRAMMER_USBBLASTER_SPI,
+ #endif
++#if CONFIG_UISP_SPI == 1
++	PROGRAMMER_UISP_SPI,
++#endif
+ 	PROGRAMMER_INVALID /* This must always be the last entry. */
+ };
+ 
+@@ -464,6 +467,12 @@
+ int buspirate_spi_init(void);
+ #endif
+ 
++/* uisp_spi.c */
++#if CONFIG_UISP_SPI == 1
++int uisp_spi_init(void);
++extern const struct dev_entry devs_usbuispspi[];
++#endif
++
+ /* linux_spi.c */
+ #if CONFIG_LINUX_SPI == 1
+ int linux_spi_init(void);
+@@ -528,6 +537,9 @@
+ #if CONFIG_USBBLASTER_SPI == 1
+ 	SPI_CONTROLLER_USBBLASTER,
+ #endif
++#if CONFIG_UISP_SPI == 1
++	SPI_CONTROLLER_UISP,
++#endif
+ };
+ 
+ #define MAX_DATA_UNSPECIFIED 0
+Index: Makefile
+===================================================================
+--- Makefile	(revision 1797)
++++ Makefile	(working copy)
+@@ -122,6 +122,11 @@
+ else
+ override CONFIG_BUSPIRATE_SPI = no
+ endif
++ifeq ($(CONFIG_UISP_SPI), yes)
++UNSUPPORTED_FEATURES += CONFIG_UISP_SPI=yes
++else
++override CONFIG_UISP_SPI = no
++endif
+ ifeq ($(CONFIG_SERPROG), yes)
+ UNSUPPORTED_FEATURES += CONFIG_SERPROG=yes
+ else
+@@ -246,6 +251,11 @@
+ else
+ override CONFIG_BUSPIRATE_SPI = no
+ endif
++ifeq ($(CONFIG_UISP_SPI), yes)
++UNSUPPORTED_FEATURES += CONFIG_UISP_SPI=yes
++else
++override CONFIG_UISP_SPI = no
++endif
+ ifeq ($(CONFIG_SERPROG), yes)
+ UNSUPPORTED_FEATURES += CONFIG_SERPROG=yes
+ else
+@@ -414,6 +424,9 @@
+ # Always enable Bus Pirate SPI for now.
+ CONFIG_BUSPIRATE_SPI ?= yes
+ 
++#Always enable uISP for now
++CONFIG_UISP_SPI ?= yes
++
+ # Disable Dediprog SF100 until support is complete and tested.
+ CONFIG_DEDIPROG ?= no
+ 
+@@ -604,6 +617,13 @@
+ NEED_SERIAL := yes
+ endif
+ 
++ifeq ($(CONFIG_UISP_SPI), yes)
++FEATURE_CFLAGS += -D'CONFIG_UISP_SPI=1'
++PROGRAMMER_OBJS += uisp_spi.o
++NEED_USB := yes
++endif
++
++
+ ifeq ($(CONFIG_DEDIPROG), yes)
+ FEATURE_CFLAGS += -D'CONFIG_DEDIPROG=1'
+ PROGRAMMER_OBJS += dediprog.o
+Index: flashrom.c
+===================================================================
+--- flashrom.c	(revision 1797)
++++ flashrom.c	(working copy)
+@@ -321,6 +321,20 @@
+ 	},
+ #endif
+ 
++#if CONFIG_UISP_SPI == 1
++	{
++		.name			= "uisp_spi",
++		.type			= USB,
++		.devs.note		= "Necromant's uISP dongle (flashprog app)\n",
++		.devs.dev               = devs_usbuispspi,
++		.init			= uisp_spi_init,
++		.map_flash_region	= fallback_map,
++		.unmap_flash_region	= fallback_unmap,
++		.delay			= internal_delay,
++	},
++#endif
++
++
+ 	{0}, /* This entry corresponds to PROGRAMMER_INVALID. */
+ };
+ 
