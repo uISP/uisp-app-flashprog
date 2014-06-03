@@ -1,1 +1,13 @@
-comment "surprisingly no user params here"
+config SINGLE_SPI_AVR_OPT
+depends on ARCH_AVR
+bool "Use only first SPI (faster)"
+help
+	This ditches beautiful code in favor of some speed
+	(You win ~3 seconds when reading a 2MiB SPI flash)
+
+choice 
+       prompt "Target platform"
+       config PLATFORM_UISP
+       depends on ARCH_AVR
+       bool "uISP dongle"
+endchoice

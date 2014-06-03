@@ -317,10 +317,7 @@ CONFIG_USB_CFG_HID_REPORT_DESCRIPTOR_LENGTH=0
 #
 # Project Settings
 #
-
-#
-# surprisingly no user params here
-#
+CONFIG_SINGLE_SPI_AVR_OPT=y
 
 #
 # Deployment settings
@@ -375,4 +372,4 @@ CONFIG_VERSION_MAJOR="0"
 CONFIG_VERSION_MINOR="2-rc1"
 CONFIG_VERSION_CODENAME="Insane Mushroom"
 CONFIG_VERSION_STRING="0.2-rc1, Insane Mushroom"
-CONFIG_VERSION_GIT="46addb1be88b4b8bdf334249241b6cc71f63ece0"
+CONFIG_VERSION_GIT="adbc15ae0a1139538a34d42db6b6e7b4b4dc8382"
