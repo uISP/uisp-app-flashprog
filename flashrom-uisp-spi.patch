@@ -2,7 +2,7 @@ Index: uisp_spi.c
 ===================================================================
 --- uisp_spi.c	(revision 0)
 +++ uisp_spi.c	(revision 0)
-@@ -0,0 +1,270 @@
+@@ -0,0 +1,344 @@
 +/*
 + * This file is part of the flashrom project.
 + * uISP programmer interface
@@ -36,20 +36,40 @@ Index: uisp_spi.c
 +#include "chipdrivers.h"
 +
 +
-+#define UISP_TIMEOUT 30000
++struct flashprog_verinfo {
++	char pgmname[16];   /* Programmer name            */
++	uint16_t max_rq;    /* Maximum RQ number          */
++	uint16_t api_ver;   /* API version                */
++	uint16_t spi_freq;  /* Current SPI frequency      */
++	uint16_t cpu_freq;  /* CPU frequency              */
++	uint16_t num_spi;   /* Number of SPI devices here */
++} __attribute__ ((packed));
++
++
++#define FLASHPROG_API_VER  1
++
++
++enum { 
++	RQ_VERINFO,
++	RQ_SPI_SET_SPEED,
++	RQ_SPI_CS,
++	RQ_SPI_IO,
++	/* Insert new requests here */ 
++	RQ_INVALID
++};
++
++
++#define UISP_TIMEOUT 6000
++
++
 +static usb_dev_handle *hndl;
++static struct flashprog_verinfo verinfo;
 +
 +#define UISP_VID   0x1d50
 +#define UISP_PID   0x6032
 +#define UISP_MSTR  "www.ncrmnt.org"
 +#define UISP_PSTR  "uISP-flashprog"
 +
-+enum { 
-+	RQ_IO=0,
-+	RQ_CS,
-+	RQ_SETSPEED,
-+	RQ_LED,
-+} uisp_requsts; 
 +
 +const struct dev_entry devs_usbuispspi[] = {
 +	{UISP_VID, UISP_PID, OK, UISP_MSTR, UISP_PSTR},
@@ -150,14 +170,14 @@ Index: uisp_spi.c
 +	ret = usb_control_msg(
 +		hndl,             // handle obtained with usb_open()
 +		USB_TYPE_VENDOR | USB_RECIP_DEVICE | USB_ENDPOINT_IN, // bRequestType
-+		RQ_IO,      // bRequest
++		RQ_SPI_IO,      // bRequest
 +		0,              // wValue
 +		0,              // wIndex
 +		readarr,             // pointer to source buffer
 +		readcnt,  // wLength
 +		UISP_TIMEOUT
 +		);
-+	msg_pspew("%s: control ret %d ", __func__, ret); 
++	msg_pspew("%s: control ret %d \n", __func__, ret); 
 +	if (ret != readcnt) {
 +		perror(__func__);
 +		return -1; 
@@ -167,7 +187,8 @@ Index: uisp_spi.c
 +
 +static int do_control(int rq, int value, int index)
 +{
-+	return  usb_control_msg(
++	int ret; 
++	ret =  usb_control_msg(
 +		hndl,             // handle obtained with usb_open()
 +		USB_TYPE_VENDOR | USB_RECIP_DEVICE | USB_ENDPOINT_IN, // bRequestType
 +		rq,      // bRequest
@@ -177,7 +198,34 @@ Index: uisp_spi.c
 +		0,  // wLength
 +		UISP_TIMEOUT
 +		);
++	msg_pspew("%s: control ret %d \n", __func__, ret); 
++	return ret;
 +}
++
++static int uisp_request_pgm_info() 
++{
++	int ret; 
++	ret = usb_control_msg(
++		hndl,             // handle obtained with usb_open()
++		USB_TYPE_VENDOR | USB_RECIP_DEVICE | USB_ENDPOINT_IN, // bRequestType
++		RQ_VERINFO,      // bRequest
++		0,              // wValue
++		0,              // wIndex
++		(char *) &verinfo,             // pointer to source buffer
++		sizeof(verinfo),  // wLength
++		UISP_TIMEOUT
++		);
++
++	msg_pspew("%s: control ret %d \n", __func__, ret); 
++
++	if (ret != sizeof(verinfo)) {
++		perror(__func__);
++		return -1; 
++	}
++
++	return 0;
++}
++
 +
 +static int send_write(unsigned int writecnt, void *writearr)
 +{
@@ -186,7 +234,7 @@ Index: uisp_spi.c
 +	ret = usb_control_msg(
 +		hndl,             // handle obtained with usb_open()
 +		USB_TYPE_VENDOR | USB_RECIP_DEVICE | USB_ENDPOINT_OUT, // bRequestType
-+		RQ_IO,      // bRequest
++		RQ_SPI_IO,      // bRequest
 +		0,              // wValue
 +		0,              // wIndex
 +		writearr,             // pointer to source buffer
@@ -212,7 +260,7 @@ Index: uisp_spi.c
 +	
 +	int ret = 0;
 +	
-+	ret = do_control(RQ_CS, 0, 0);
++	ret = do_control(RQ_SPI_CS, 0, 0);
 +
 +	if (!ret && writecnt)
 +		ret = send_write(writecnt, (void *) writearr);
@@ -220,7 +268,7 @@ Index: uisp_spi.c
 +	if (!ret && readcnt)
 +		ret = send_read(readcnt, readarr);
 +
-+	ret = do_control(RQ_CS, 1, 0);
++	ret = do_control(RQ_SPI_CS, 1, 0);
 +
 +	return ret;
 +}
@@ -265,54 +313,43 @@ Index: uisp_spi.c
 +{	
 +	msg_pspew("%s\n", __func__);
 +	usb_init();
++
++	/* TODO: Iterate over a list of compatible device ids */
 +	hndl = nc_usb_open(UISP_VID, UISP_PID, UISP_MSTR, UISP_PSTR, NULL);
 +	if (!hndl)  
 +		return 1;
++
++	uisp_request_pgm_info();
++
++	msg_pinfo("uisp_spi: Programmer name is \"%s\" \n", verinfo.pgmname);
++	msg_pinfo("uisp_spi: Programmer CPU Freq is %u kHz\n", verinfo.cpu_freq);
++	msg_pinfo("uisp_spi: Programmer SPI Freq is %u kHz\n", verinfo.spi_freq);
++	msg_pinfo("uisp_spi: Programmer supports %u SPI bus(es)\n", verinfo.num_spi);
++
++	if (verinfo.api_ver != FLASHPROG_API_VER) {
++		msg_perr("uisp_spi: Error: flashrom expects API %d device has API %d\n", 
++			 FLASHPROG_API_VER, verinfo.api_ver);
++		return -1;
++	}
++
++	if (RQ_INVALID < verinfo.max_rq) {
++		msg_pwarn("uisp_spi: flashrom supports fewer requests than device exports\n");
++		msg_pwarn("uisp_spi: Your version of flashrom may be outdated!\n");
++	}
++
++	if (RQ_INVALID > verinfo.max_rq) {
++		msg_pwarn("uisp_spi: flashrom supports more requests than device exports\n");
++		msg_pwarn("uisp_spi: Your device firmware may be outdated\n");
++		msg_pwarn("uisp_spi: Continue at your own risk!\n");
++	}
 +	
 +	register_spi_programmer(&spi_programmer_uisp);
 +	
 +	return 0;
 +}
-Index: programmer.h
-===================================================================
---- programmer.h	(revision 1797)
-+++ programmer.h	(working copy)
-@@ -90,6 +90,9 @@
- #if CONFIG_USBBLASTER_SPI == 1
- 	PROGRAMMER_USBBLASTER_SPI,
- #endif
-+#if CONFIG_UISP_SPI == 1
-+	PROGRAMMER_UISP_SPI,
-+#endif
- 	PROGRAMMER_INVALID /* This must always be the last entry. */
- };
- 
-@@ -464,6 +467,12 @@
- int buspirate_spi_init(void);
- #endif
- 
-+/* uisp_spi.c */
-+#if CONFIG_UISP_SPI == 1
-+int uisp_spi_init(void);
-+extern const struct dev_entry devs_usbuispspi[];
-+#endif
-+
- /* linux_spi.c */
- #if CONFIG_LINUX_SPI == 1
- int linux_spi_init(void);
-@@ -528,6 +537,9 @@
- #if CONFIG_USBBLASTER_SPI == 1
- 	SPI_CONTROLLER_USBBLASTER,
- #endif
-+#if CONFIG_UISP_SPI == 1
-+	SPI_CONTROLLER_UISP,
-+#endif
- };
- 
- #define MAX_DATA_UNSPECIFIED 0
 Index: Makefile
 ===================================================================
---- Makefile	(revision 1797)
+--- Makefile	(revision 1809)
 +++ Makefile	(working copy)
 @@ -122,6 +122,11 @@
  else
@@ -326,7 +363,7 @@ Index: Makefile
  ifeq ($(CONFIG_SERPROG), yes)
  UNSUPPORTED_FEATURES += CONFIG_SERPROG=yes
  else
-@@ -246,6 +251,11 @@
+@@ -251,6 +256,11 @@
  else
  override CONFIG_BUSPIRATE_SPI = no
  endif
@@ -338,7 +375,7 @@ Index: Makefile
  ifeq ($(CONFIG_SERPROG), yes)
  UNSUPPORTED_FEATURES += CONFIG_SERPROG=yes
  else
-@@ -414,6 +424,9 @@
+@@ -427,6 +437,9 @@
  # Always enable Bus Pirate SPI for now.
  CONFIG_BUSPIRATE_SPI ?= yes
  
@@ -348,7 +385,7 @@ Index: Makefile
  # Disable Dediprog SF100 until support is complete and tested.
  CONFIG_DEDIPROG ?= no
  
-@@ -604,6 +617,13 @@
+@@ -623,6 +636,13 @@
  NEED_SERIAL := yes
  endif
  
@@ -364,9 +401,9 @@ Index: Makefile
  PROGRAMMER_OBJS += dediprog.o
 Index: flashrom.c
 ===================================================================
---- flashrom.c	(revision 1797)
+--- flashrom.c	(revision 1809)
 +++ flashrom.c	(working copy)
-@@ -321,6 +321,20 @@
+@@ -333,6 +333,20 @@
  	},
  #endif
  
@@ -387,3 +424,40 @@ Index: flashrom.c
  	{0}, /* This entry corresponds to PROGRAMMER_INVALID. */
  };
  
+Index: programmer.h
+===================================================================
+--- programmer.h	(revision 1809)
++++ programmer.h	(working copy)
+@@ -93,6 +93,9 @@
+ #if CONFIG_USBBLASTER_SPI == 1
+ 	PROGRAMMER_USBBLASTER_SPI,
+ #endif
++#if CONFIG_UISP_SPI == 1
++	PROGRAMMER_UISP_SPI,
++#endif
+ 	PROGRAMMER_INVALID /* This must always be the last entry. */
+ };
+ 
+@@ -474,6 +477,12 @@
+ int buspirate_spi_init(void);
+ #endif
+ 
++/* uisp_spi.c */
++#if CONFIG_UISP_SPI == 1
++int uisp_spi_init(void);
++extern const struct dev_entry devs_usbuispspi[];
++#endif
++
+ /* linux_spi.c */
+ #if CONFIG_LINUX_SPI == 1
+ int linux_spi_init(void);
+@@ -538,6 +547,9 @@
+ #if CONFIG_USBBLASTER_SPI == 1
+ 	SPI_CONTROLLER_USBBLASTER,
+ #endif
++#if CONFIG_UISP_SPI == 1
++	SPI_CONTROLLER_UISP,
++#endif
+ };
+ 
+ #define MAX_DATA_UNSPECIFIED 0
