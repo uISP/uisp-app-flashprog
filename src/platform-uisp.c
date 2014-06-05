@@ -46,9 +46,31 @@ static void spi_read_block(unsigned char* data, uint16_t len)
 	}
 }
 
+struct spi_spd_lookup {
+	uint16_t speed_khz;
+	uint8_t spi_2x;
+	uint8_t spi_ps;
+};
 
-void spi_set_speed(uint16_t spd_khz)
+static struct spi_spd_lookup s_lookup[] = {
+	{ F_CPU / 1000 / 2,   (1<<SPI2X),  0                        },
+	{ F_CPU / 1000 / 4,   0,           0                        },
+	{ F_CPU / 1000 / 8,   (1<<SPI2X),  (1<<SPR0)                },
+	{ F_CPU / 1000 / 16,  0,           (1<<SPR0)                },
+	{ F_CPU / 1000 / 32,  (1<<SPI2X),  (1<<SPR1)                },
+	{ F_CPU / 1000 / 64,  0,           ((1<<SPR1) | (1<<SPR0))  },
+	{ F_CPU / 1000 / 128, 0,           ((1<<SPR0) | (1<<SPR1))  },
+};
+
+uint16_t spi_set_speed(uint16_t spd_khz)
 {
+
+	int i; 
+	for (i=0; i<ARRAY_SIZE(s_lookup); i++) {
+		if (s_lookup[i].speed_khz <= spd_khz)
+			break;
+	}
+
 	/* set SS low */
 	SPI_PORT &= ~(1<<SS);
 	/* Enable MOSI,SCK,SS as output like on
@@ -57,12 +79,10 @@ void spi_set_speed(uint16_t spd_khz)
 	/* Enable SPI Master, set the clock to F_CPU / 2 */
 	/* CPOL and CPHA are 0 for SPI mode 0 (see wikipedia) */
 	/* we use mode 0 like for the linux spi in flashprog*/
-	SPCR = (1<<SPE)|(1<<MSTR);
-	SPSR = (1<<SPI2X);
-	g_flashprog_platform.vinfo.spi_freq = 8000;
+	SPCR = (1<<SPE)|(1<<MSTR) | s_lookup[i].spi_ps;
+	SPSR = s_lookup[i].spi_2x;
+	return s_lookup[i].speed_khz;
 }
-
-
 
 ANTARES_INIT_LOW(io_init)
 {
@@ -81,13 +101,13 @@ ANTARES_INIT_LOW(io_init)
 
 struct flashprog_spi_device sdevs[] = {
 	{ 
-		.cs          = spi_cs,
-		.set_speed   = spi_set_speed,
-		.write_block = spi_write_block,
-		.read_block  = spi_read_block,
+		.cs              = spi_cs,
+		.set_speed       = spi_set_speed,
+		.write_block     = spi_write_block,
+		.read_block      = spi_read_block,
+		.cur_spi_spd_khz = (F_CPU / 1000 / 2)
 	},		
 };
-
 
 
 struct flashprog_platform g_flashprog_platform = {
@@ -95,7 +115,7 @@ struct flashprog_platform g_flashprog_platform = {
 		.pgmname  = "uISP-flashprog",
 		.max_rq   = RQ_INVALID,
 		.api_ver  = FLASHPROG_API_VER,
-		.spi_freq = 8000,
+		.spi_freq = (F_CPU / 1000 / 2),
 		.cpu_freq = (F_CPU / 1000),
 		.num_spi  = ARRAY_SIZE(sdevs), 
 	},

@@ -13,7 +13,7 @@
 
 /* PROTOCOL: 
    All communication is done via control transfers. 
-   wIndex specifies the SPI interface number to work with during this request. 
+   wIndex ALWAYS specifies the SPI interface number to work with during this request. 
    wValue is request-specific e.g. CS value.   
  */
 
@@ -50,11 +50,13 @@ usbMsgLen_t usbFunctionSetup(uchar data[8])
 		rq_len = rq->wLength.word; 
 		return USB_NO_MSG;
 	} else if (rq->bRequest == RQ_SPI_CS) {
-		spi->cs(rq->wValue.bytes[0]); /* Set the active spi */
+		spi->cs(rq->wValue.bytes[0]);
 	} else if (rq->bRequest == RQ_SPI_SET_SPEED) {
-		spi->set_speed(rq->wValue.word); /* Set the active spi */
+		spi->cur_spi_spd_khz = spi->set_speed(rq->wValue.word);
+	} else if (rq->bRequest == RQ_SPI_GET_SPEED) {
+		usbMsgPtr = &spi->cur_spi_spd_khz;
+		return sizeof(spi->cur_spi_spd_khz);
 	}
-
 	return 0;
 }
 

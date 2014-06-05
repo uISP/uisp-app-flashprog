@@ -17,6 +17,7 @@
 enum { 
 	RQ_VERINFO,
 	RQ_SPI_SET_SPEED,
+	RQ_SPI_GET_SPEED,
 	RQ_SPI_CS,
 	RQ_SPI_IO,
 	/* Insert new requests here */ 
@@ -34,10 +35,11 @@ struct flashprog_verinfo {
 } __attribute__((packed));
 
 struct flashprog_spi_device {
-	void (*cs)          (unsigned char state);
-	void (*set_speed)   (uint16_t speed_khz);
-	void (*write_block) (unsigned char* data, uint16_t len);
-	void (*read_block)  (unsigned char* data, uint16_t len);
+	void     (*cs)          (unsigned char state);
+	uint16_t (*set_speed)   (uint16_t speed_khz);
+	void     (*write_block) (unsigned char* data, uint16_t len);
+	void     (*read_block)  (unsigned char* data, uint16_t len);
+	uint16_t cur_spi_spd_khz;
 };
 
 struct flashprog_platform {
