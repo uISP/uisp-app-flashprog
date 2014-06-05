@@ -1,11 +1,125 @@
+Index: programmer.h
+===================================================================
+--- programmer.h	(revision 1809)
++++ programmer.h	(working copy)
+@@ -93,6 +93,9 @@
+ #if CONFIG_USBBLASTER_SPI == 1
+ 	PROGRAMMER_USBBLASTER_SPI,
+ #endif
++#if CONFIG_UISP_SPI == 1
++	PROGRAMMER_UISP_SPI,
++#endif
+ 	PROGRAMMER_INVALID /* This must always be the last entry. */
+ };
+ 
+@@ -474,6 +477,12 @@
+ int buspirate_spi_init(void);
+ #endif
+ 
++/* uisp_spi.c */
++#if CONFIG_UISP_SPI == 1
++int uisp_spi_init(void);
++extern const struct dev_entry devs_usbuispspi[];
++#endif
++
+ /* linux_spi.c */
+ #if CONFIG_LINUX_SPI == 1
+ int linux_spi_init(void);
+@@ -538,6 +547,9 @@
+ #if CONFIG_USBBLASTER_SPI == 1
+ 	SPI_CONTROLLER_USBBLASTER,
+ #endif
++#if CONFIG_UISP_SPI == 1
++	SPI_CONTROLLER_UISP,
++#endif
+ };
+ 
+ #define MAX_DATA_UNSPECIFIED 0
+Index: Makefile
+===================================================================
+--- Makefile	(revision 1809)
++++ Makefile	(working copy)
+@@ -122,6 +122,11 @@
+ else
+ override CONFIG_BUSPIRATE_SPI = no
+ endif
++ifeq ($(CONFIG_UISP_SPI), yes)
++UNSUPPORTED_FEATURES += CONFIG_UISP_SPI=yes
++else
++override CONFIG_UISP_SPI = no
++endif
+ ifeq ($(CONFIG_SERPROG), yes)
+ UNSUPPORTED_FEATURES += CONFIG_SERPROG=yes
+ else
+@@ -251,6 +256,11 @@
+ else
+ override CONFIG_BUSPIRATE_SPI = no
+ endif
++ifeq ($(CONFIG_UISP_SPI), yes)
++UNSUPPORTED_FEATURES += CONFIG_UISP_SPI=yes
++else
++override CONFIG_UISP_SPI = no
++endif
+ ifeq ($(CONFIG_SERPROG), yes)
+ UNSUPPORTED_FEATURES += CONFIG_SERPROG=yes
+ else
+@@ -427,6 +437,9 @@
+ # Always enable Bus Pirate SPI for now.
+ CONFIG_BUSPIRATE_SPI ?= yes
+ 
++#Always enable uISP for now
++CONFIG_UISP_SPI ?= yes
++
+ # Disable Dediprog SF100 until support is complete and tested.
+ CONFIG_DEDIPROG ?= no
+ 
+@@ -623,6 +636,13 @@
+ NEED_SERIAL := yes
+ endif
+ 
++ifeq ($(CONFIG_UISP_SPI), yes)
++FEATURE_CFLAGS += -D'CONFIG_UISP_SPI=1'
++PROGRAMMER_OBJS += uisp_spi.o
++NEED_USB := yes
++endif
++
++
+ ifeq ($(CONFIG_DEDIPROG), yes)
+ FEATURE_CFLAGS += -D'CONFIG_DEDIPROG=1'
+ PROGRAMMER_OBJS += dediprog.o
+Index: flashrom.c
+===================================================================
+--- flashrom.c	(revision 1809)
++++ flashrom.c	(working copy)
+@@ -333,6 +333,20 @@
+ 	},
+ #endif
+ 
++#if CONFIG_UISP_SPI == 1
++	{
++		.name			= "uisp_spi",
++		.type			= USB,
++		.devs.note		= "Necromant's uISP dongle (flashprog app)\n",
++		.devs.dev               = devs_usbuispspi,
++		.init			= uisp_spi_init,
++		.map_flash_region	= fallback_map,
++		.unmap_flash_region	= fallback_unmap,
++		.delay			= internal_delay,
++	},
++#endif
++
++
+ 	{0}, /* This entry corresponds to PROGRAMMER_INVALID. */
+ };
+ 
 Index: uisp_spi.c
 ===================================================================
 --- uisp_spi.c	(revision 0)
 +++ uisp_spi.c	(revision 0)
-@@ -0,0 +1,344 @@
+@@ -0,0 +1,417 @@
 +/*
 + * This file is part of the flashrom project.
-+ * uISP programmer interface
++ * uISP-flashprog programmer interface
 + *
 + * Copyright (C) 2014 Andew "Necromant" Andrianov <andrew@ncrmnt.org>
 + *
@@ -52,28 +166,26 @@ Index: uisp_spi.c
 +enum { 
 +	RQ_VERINFO,
 +	RQ_SPI_SET_SPEED,
++	RQ_SPI_GET_SPEED,
 +	RQ_SPI_CS,
 +	RQ_SPI_IO,
 +	/* Insert new requests here */ 
 +	RQ_INVALID
 +};
 +
-+
 +#define UISP_TIMEOUT 6000
-+
 +
 +static usb_dev_handle *hndl;
 +static struct flashprog_verinfo verinfo;
++static uint16_t dev_index;
 +
 +#define UISP_VID   0x1d50
 +#define UISP_PID   0x6032
 +#define UISP_MSTR  "www.ncrmnt.org"
 +#define UISP_PSTR  "uISP-flashprog"
 +
-+
 +const struct dev_entry devs_usbuispspi[] = {
 +	{UISP_VID, UISP_PID, OK, UISP_MSTR, UISP_PSTR},
-+
 +	{}
 +};
 +
@@ -123,7 +235,7 @@ Index: uisp_spi.c
 +{
 +	usb_dev_handle      *handle = usb_open(dev);
 +	if(!handle) {
-+		fprintf(stderr, "Warning: cannot open USB device: %s\n", usb_strerror());
++		msg_perr("uisp_spi: Error: Unable to query device info (udev rules problem?)\n");
 +		return NULL;
 +	}
 +	if (
@@ -172,7 +284,7 @@ Index: uisp_spi.c
 +		USB_TYPE_VENDOR | USB_RECIP_DEVICE | USB_ENDPOINT_IN, // bRequestType
 +		RQ_SPI_IO,      // bRequest
 +		0,              // wValue
-+		0,              // wIndex
++		dev_index,              // wIndex
 +		readarr,             // pointer to source buffer
 +		readcnt,  // wLength
 +		UISP_TIMEOUT
@@ -210,7 +322,7 @@ Index: uisp_spi.c
 +		USB_TYPE_VENDOR | USB_RECIP_DEVICE | USB_ENDPOINT_IN, // bRequestType
 +		RQ_VERINFO,      // bRequest
 +		0,              // wValue
-+		0,              // wIndex
++		dev_index,              // wIndex
 +		(char *) &verinfo,             // pointer to source buffer
 +		sizeof(verinfo),  // wLength
 +		UISP_TIMEOUT
@@ -224,6 +336,31 @@ Index: uisp_spi.c
 +	}
 +
 +	return 0;
++}
++
++static int uisp_get_spi_freq() 
++{
++	int ret; 
++	uint16_t freq;
++	ret = usb_control_msg(
++		hndl,             
++		USB_TYPE_VENDOR | USB_RECIP_DEVICE | USB_ENDPOINT_IN, 
++		RQ_SPI_GET_SPEED,
++		0,             
++		dev_index,     
++		(char *) &freq,
++		sizeof(freq),  
++		UISP_TIMEOUT
++		);
++	
++	msg_pspew("%s: control ret %d freq %u \n", __func__, ret, freq); 
++
++	if (ret != sizeof(freq)) {
++		perror(__func__);
++		return -1; 
++	}
++
++	return (int) freq;
 +}
 +
 +
@@ -308,13 +445,29 @@ Index: uisp_spi.c
 +}
 +
 +
-+
 +int uisp_spi_init(void)
 +{	
++	int ret; 
 +	msg_pspew("%s\n", __func__);
 +	usb_init();
 +
-+	/* TODO: Iterate over a list of compatible device ids */
++	uint16_t spi_freq = 0;
++	
++	char *s_idx = extract_programmer_param("idx");
++	if (s_idx && strlen(s_idx)) {
++		dev_index = atoi(s_idx);
++	}
++	
++	char *s_freq = extract_programmer_param("spi_freq");
++	if (s_freq && strlen(s_freq)) {
++		spi_freq = (uint16_t) atoi(s_freq);
++	}
++	
++	/* 
++	 * TODO: Iterate over a list of compatible device ids. 
++	 * While there's only one - ignore it 
++	 */
++
 +	hndl = nc_usb_open(UISP_VID, UISP_PID, UISP_MSTR, UISP_PSTR, NULL);
 +	if (!hndl)  
 +		return 1;
@@ -322,142 +475,62 @@ Index: uisp_spi.c
 +	uisp_request_pgm_info();
 +
 +	msg_pinfo("uisp_spi: Programmer name is \"%s\" \n", verinfo.pgmname);
-+	msg_pinfo("uisp_spi: Programmer CPU Freq is %u kHz\n", verinfo.cpu_freq);
-+	msg_pinfo("uisp_spi: Programmer SPI Freq is %u kHz\n", verinfo.spi_freq);
++	msg_pinfo("uisp_spi: Programmer CPU speed is %u kHz\n", verinfo.cpu_freq);
++	msg_pinfo("uisp_spi: Programmer maximum SPI speed is %u kHz\n", verinfo.spi_freq);
 +	msg_pinfo("uisp_spi: Programmer supports %u SPI bus(es)\n", verinfo.num_spi);
 +
++	
 +	if (verinfo.api_ver != FLASHPROG_API_VER) {
 +		msg_perr("uisp_spi: Error: flashrom expects API %d device has API %d\n", 
 +			 FLASHPROG_API_VER, verinfo.api_ver);
 +		return -1;
 +	}
-+
++	
 +	if (RQ_INVALID < verinfo.max_rq) {
 +		msg_pwarn("uisp_spi: flashrom supports fewer requests than device exports\n");
 +		msg_pwarn("uisp_spi: Your version of flashrom may be outdated!\n");
 +	}
-+
++	
 +	if (RQ_INVALID > verinfo.max_rq) {
 +		msg_pwarn("uisp_spi: flashrom supports more requests than device exports\n");
 +		msg_pwarn("uisp_spi: Your device firmware may be outdated\n");
 +		msg_pwarn("uisp_spi: Continue at your own risk!\n");
 +	}
++
++	if (dev_index >= verinfo.num_spi) {
++		msg_perr("uisp_spi: Error: You want to use SPI bus %d but programmer only has %d bus(es)\n", 
++			 dev_index, verinfo.num_spi);
++		return -1;
++	}
++
++	if (spi_freq && (spi_freq > verinfo.spi_freq)) {
++		msg_perr("uisp_spi: Error: Requested SPI speed %u kHz but programmer can only go as fast"
++			 " as %d kHz\n", 
++			 spi_freq, verinfo.spi_freq);
++		return -1;
++	}	
++	
++	/* Set the actual spi frequency */ 
++	if (spi_freq) { 
++		msg_pinfo("uisp_spi: Requesting SPI speed of %u kHz\n", spi_freq);
++		ret = do_control(RQ_SPI_SET_SPEED, spi_freq, dev_index);
++		if (ret < 0) { 
++			perror(__func__);
++			return -1;
++		}
++	}
++
++	int actual_freq = uisp_get_spi_freq(); 
++	if (actual_freq < 0) {
++		perror(__func__);
++		return -1;
++	}
++	
++	msg_pinfo("uisp_spi: Using SPI bus %d, actual SPI freq is %d kHz\n", 
++		  dev_index, actual_freq);
 +	
 +	register_spi_programmer(&spi_programmer_uisp);
 +	
 +	return 0;
 +}
-Index: Makefile
-===================================================================
---- Makefile	(revision 1809)
-+++ Makefile	(working copy)
-@@ -122,6 +122,11 @@
- else
- override CONFIG_BUSPIRATE_SPI = no
- endif
-+ifeq ($(CONFIG_UISP_SPI), yes)
-+UNSUPPORTED_FEATURES += CONFIG_UISP_SPI=yes
-+else
-+override CONFIG_UISP_SPI = no
-+endif
- ifeq ($(CONFIG_SERPROG), yes)
- UNSUPPORTED_FEATURES += CONFIG_SERPROG=yes
- else
-@@ -251,6 +256,11 @@
- else
- override CONFIG_BUSPIRATE_SPI = no
- endif
-+ifeq ($(CONFIG_UISP_SPI), yes)
-+UNSUPPORTED_FEATURES += CONFIG_UISP_SPI=yes
-+else
-+override CONFIG_UISP_SPI = no
-+endif
- ifeq ($(CONFIG_SERPROG), yes)
- UNSUPPORTED_FEATURES += CONFIG_SERPROG=yes
- else
-@@ -427,6 +437,9 @@
- # Always enable Bus Pirate SPI for now.
- CONFIG_BUSPIRATE_SPI ?= yes
- 
-+#Always enable uISP for now
-+CONFIG_UISP_SPI ?= yes
 +
- # Disable Dediprog SF100 until support is complete and tested.
- CONFIG_DEDIPROG ?= no
- 
-@@ -623,6 +636,13 @@
- NEED_SERIAL := yes
- endif
- 
-+ifeq ($(CONFIG_UISP_SPI), yes)
-+FEATURE_CFLAGS += -D'CONFIG_UISP_SPI=1'
-+PROGRAMMER_OBJS += uisp_spi.o
-+NEED_USB := yes
-+endif
-+
-+
- ifeq ($(CONFIG_DEDIPROG), yes)
- FEATURE_CFLAGS += -D'CONFIG_DEDIPROG=1'
- PROGRAMMER_OBJS += dediprog.o
-Index: flashrom.c
-===================================================================
---- flashrom.c	(revision 1809)
-+++ flashrom.c	(working copy)
-@@ -333,6 +333,20 @@
- 	},
- #endif
- 
-+#if CONFIG_UISP_SPI == 1
-+	{
-+		.name			= "uisp_spi",
-+		.type			= USB,
-+		.devs.note		= "Necromant's uISP dongle (flashprog app)\n",
-+		.devs.dev               = devs_usbuispspi,
-+		.init			= uisp_spi_init,
-+		.map_flash_region	= fallback_map,
-+		.unmap_flash_region	= fallback_unmap,
-+		.delay			= internal_delay,
-+	},
-+#endif
-+
-+
- 	{0}, /* This entry corresponds to PROGRAMMER_INVALID. */
- };
- 
-Index: programmer.h
-===================================================================
---- programmer.h	(revision 1809)
-+++ programmer.h	(working copy)
-@@ -93,6 +93,9 @@
- #if CONFIG_USBBLASTER_SPI == 1
- 	PROGRAMMER_USBBLASTER_SPI,
- #endif
-+#if CONFIG_UISP_SPI == 1
-+	PROGRAMMER_UISP_SPI,
-+#endif
- 	PROGRAMMER_INVALID /* This must always be the last entry. */
- };
- 
-@@ -474,6 +477,12 @@
- int buspirate_spi_init(void);
- #endif
- 
-+/* uisp_spi.c */
-+#if CONFIG_UISP_SPI == 1
-+int uisp_spi_init(void);
-+extern const struct dev_entry devs_usbuispspi[];
-+#endif
-+
- /* linux_spi.c */
- #if CONFIG_LINUX_SPI == 1
- int linux_spi_init(void);
-@@ -538,6 +547,9 @@
- #if CONFIG_USBBLASTER_SPI == 1
- 	SPI_CONTROLLER_USBBLASTER,
- #endif
-+#if CONFIG_UISP_SPI == 1
-+	SPI_CONTROLLER_UISP,
-+#endif
- };
- 
- #define MAX_DATA_UNSPECIFIED 0
