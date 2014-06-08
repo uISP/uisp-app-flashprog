@@ -29,7 +29,7 @@ static void spi_write_block(unsigned char* data, uint16_t len)
 {
 	/* transmit c on the SPI bus */
 	while (len--) { 
-		SPDR = *data++;
+		SPDR = *data;
 		/* Wait for the transmission to be completed */
 		loop_until_bit_is_set(SPSR,SPIF);
 	}
@@ -79,7 +79,7 @@ uint16_t spi_set_speed(uint16_t spd_khz)
 	/* Enable SPI Master, set the clock to F_CPU / 2 */
 	/* CPOL and CPHA are 0 for SPI mode 0 (see wikipedia) */
 	/* we use mode 0 like for the linux spi in flashprog*/
-	SPCR = (1<<SPE)|(1<<MSTR) | s_lookup[i].spi_ps;
+	SPCR = (1<<SPE) | (1<<MSTR) | s_lookup[i].spi_ps;
 	SPSR = s_lookup[i].spi_2x;
 	return s_lookup[i].speed_khz;
 }
